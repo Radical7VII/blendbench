@@ -13,11 +13,13 @@
 
 from . import import_bedrock_anim
 from . import export_bedrock_anim
+from . import import_bedrock_model
 
 
 modules = [
     import_bedrock_anim,
     export_bedrock_anim,
+    import_bedrock_model,
 ]
 
 
