@@ -12,10 +12,12 @@
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 from . import import_bedrock_anim
+from . import export_bedrock_anim
 
 
 modules = [
     import_bedrock_anim,
+    export_bedrock_anim,
 ]
 
 
