@@ -10,6 +10,7 @@ from decimal import Decimal
 from typing import Dict, List, Any, Optional, Tuple
 from bpy.props import StringProperty, BoolProperty, EnumProperty
 from bpy_extras.io_utils import ExportHelper
+from mathutils import Quaternion
 
 
 # 动画时间戳精度（小数位数）
@@ -83,14 +84,20 @@ class BBAnimExporter:
 
         for fcurve in action.fcurves:
             # 解析数据路径，例如: pose.bones["bone_name"].location
-            if f'pose.bones["{bone_name}"]' not in fcurve.data_path:
+            # 支持两种引号格式
+            if f'pose.bones["{bone_name}"]' not in fcurve.data_path and \
+               f"pose.bones['{bone_name}']" not in fcurve.data_path:
                 continue
 
             # 确定变换类型
             transform_type = None
             if '.location' in fcurve.data_path:
                 transform_type = 'location'
-            elif '.rotation' in fcurve.data_path:
+            elif '.rotation_quaternion' in fcurve.data_path:
+                transform_type = 'rotation'
+            elif '.rotation_euler' in fcurve.data_path:
+                transform_type = 'rotation'
+            elif '.rotation_axis_angle' in fcurve.data_path:
                 transform_type = 'rotation'
             elif '.scale' in fcurve.data_path:
                 transform_type = 'scale'
@@ -134,7 +141,12 @@ class BBAnimExporter:
         if pose_bone.rotation_mode == 'QUATERNION':
             rotation = pose_bone.rotation_quaternion.to_euler('XYZ')
         elif pose_bone.rotation_mode == 'AXIS_ANGLE':
-            rotation = pose_bone.rotation_axis_angle.to_euler('XYZ')
+            # axis_angle 格式: (angle, x, y, z)
+            aa = pose_bone.rotation_axis_angle
+            axis = (aa[1], aa[2], aa[3])
+            angle = aa[0]
+            quat = Quaternion(axis, angle)
+            rotation = quat.to_euler('XYZ')
         else:
             rotation = pose_bone.rotation_euler.copy()
 
