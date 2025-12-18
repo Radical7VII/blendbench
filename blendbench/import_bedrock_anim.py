@@ -214,7 +214,7 @@ class IMPORT_OT_bedrock_anim(bpy.types.Operator, ImportHelper):
     """导入 Bedrock/Blockbench 动画文件（导入所有动画到当前选中的骨架）"""
 
     bl_idname = "import_anim.bedrock"
-    bl_label = "Import Bedrock Animation"
+    bl_label = "Bedrock Animation (.json)"
     bl_options = {"REGISTER", "UNDO"}
 
     filename_ext = ".json"
