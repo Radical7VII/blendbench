@@ -48,6 +48,11 @@ def blender_interpolation_to_blockbench(interpolation: str) -> str:
     return mapping.get(interpolation, 'linear')
 
 
+def needs_baking(interpolation: str) -> bool:
+    """判断插值类型是否需要烘焙"""
+    return interpolation == 'BEZIER'
+
+
 def convert_location_to_minecraft(loc) -> List[float]:
     """
     将 Blender 位置转换为 Minecraft 坐标系
@@ -137,11 +142,40 @@ class BBAnimExporter:
                 for keyframe in fcurve.keyframe_points:
                     frame = int(keyframe.co[0])
                     interpolation = keyframe.interpolation
-                    # 如果同一帧已有记录，保留已有的（多个通道可能有不同插值）
+                    # 如果同一帧已有记录，优先保留需要烘焙的类型（BEZIER）
                     if frame not in keyframes[transform_type]:
+                        keyframes[transform_type][frame] = interpolation
+                    elif needs_baking(interpolation):
                         keyframes[transform_type][frame] = interpolation
 
         return keyframes
+
+    def get_bake_frames(
+        self, keyframes: Dict[int, str], frame_start: int, frame_end: int
+    ) -> set:
+        """
+        获取需要烘焙采样的所有帧号
+
+        对于贝塞尔插值的区间，按每帧采样
+        """
+        bake_frames = set()
+        sorted_frames = sorted(keyframes.keys())
+
+        for i, frame in enumerate(sorted_frames):
+            if frame < frame_start or frame > frame_end:
+                continue
+
+            interpolation = keyframes[frame]
+
+            # 如果当前帧是贝塞尔，需要烘焙到下一个关键帧之间的所有帧
+            if needs_baking(interpolation) and i < len(sorted_frames) - 1:
+                next_frame = sorted_frames[i + 1]
+                # 添加区间内的所有帧（不包括起始关键帧，因为它已经是关键帧了）
+                for f in range(frame + 1, next_frame):
+                    if f <= frame_end:
+                        bake_frames.add(f)
+
+        return bake_frames
 
     def sample_bone_transform_at_frame(self, bone_name: str, frame: int) -> Optional[Dict]:
         """在指定帧采样骨骼的变换数据"""
@@ -182,23 +216,26 @@ class BBAnimExporter:
     def _make_keyframe_value(
         self,
         vector: List[float],
-        interpolation: str,
         prev_vector: Optional[List[float]] = None,
-        prev_interpolation: Optional[str] = None
+        prev_interpolation: Optional[str] = None,
+        is_baked: bool = False
     ) -> Any:
         """
         根据插值类型生成关键帧值
 
         Blockbench 格式:
         - 简单格式（linear）: [x, y, z]
-        - 贝塞尔格式: {"vector": [x, y, z], "lerp_mode": "bezier"}
         - 阶梯格式（step）: {"pre": [前一帧值], "post": [当前值]}
 
-        注意：step 表示从当前帧到下一帧的插值方式。
-        当前一帧是 step 时，当前帧需要用 pre/post 格式来表示跳变。
+        注意：
+        - step 表示从当前帧到下一帧的插值方式，当前一帧是 step 时需要 pre/post 格式
+        - bezier 会被烘焙成多个 linear 帧，所以烘焙帧直接输出向量
         """
-        bb_interp = blender_interpolation_to_blockbench(interpolation)
         prev_bb_interp = blender_interpolation_to_blockbench(prev_interpolation) if prev_interpolation else None
+
+        # 烘焙帧总是输出为简单向量（linear）
+        if is_baked:
+            return vector
 
         # 如果前一帧是 step，当前帧需要 pre/post 格式
         if prev_bb_interp == 'step' and prev_vector is not None:
@@ -207,18 +244,7 @@ class BBAnimExporter:
                 'post': vector
             }
 
-        # linear 是默认值，直接返回向量
-        if bb_interp == 'linear':
-            return vector
-
-        # bezier 使用 lerp_mode
-        if bb_interp == 'bezier':
-            return {
-                'vector': vector,
-                'lerp_mode': 'bezier'
-            }
-
-        # 当前帧是 step 但前一帧不是 step，直接返回向量（step 影响的是到下一帧的插值）
+        # 其他情况直接返回向量（linear 和 bezier 的关键帧本身）
         return vector
 
     def export_bone_animation(self, bone_name: str, frame_start: int, frame_end: int) -> Dict[str, Any]:
@@ -232,20 +258,25 @@ class BBAnimExporter:
             position_data = {}
             prev_loc = None
             prev_interp = None
-            for frame in sorted(keyframes['location'].keys()):
+            # 获取需要烘焙的帧
+            bake_frames = self.get_bake_frames(keyframes['location'], frame_start, frame_end)
+            # 合并关键帧和烘焙帧
+            all_frames = set(keyframes['location'].keys()) | bake_frames
+            for frame in sorted(all_frames):
                 if frame < frame_start or frame > frame_end:
                     continue
                 transform = self.sample_bone_transform_at_frame(bone_name, frame)
                 if transform:
                     mc_loc = convert_location_to_minecraft(transform['location'])
                     timestamp = frame_to_timestamp(frame, self.fps)
-                    interpolation = keyframes['location'][frame]
+                    is_baked = frame in bake_frames
                     current_loc = get_vector_json(mc_loc)
                     position_data[timestamp] = self._make_keyframe_value(
-                        current_loc, interpolation, prev_loc, prev_interp
+                        current_loc, prev_loc, prev_interp, is_baked
                     )
                     prev_loc = current_loc
-                    prev_interp = interpolation
+                    # 烘焙帧的插值类型视为 linear
+                    prev_interp = 'LINEAR' if is_baked else keyframes['location'].get(frame)
 
             if position_data:
                 bone_data['position'] = position_data
@@ -255,20 +286,24 @@ class BBAnimExporter:
             rotation_data = {}
             prev_rot = None
             prev_interp = None
-            for frame in sorted(keyframes['rotation'].keys()):
+            # 获取需要烘焙的帧
+            bake_frames = self.get_bake_frames(keyframes['rotation'], frame_start, frame_end)
+            # 合并关键帧和烘焙帧
+            all_frames = set(keyframes['rotation'].keys()) | bake_frames
+            for frame in sorted(all_frames):
                 if frame < frame_start or frame > frame_end:
                     continue
                 transform = self.sample_bone_transform_at_frame(bone_name, frame)
                 if transform:
                     mc_rot = convert_rotation_to_minecraft(transform['rotation'])
                     timestamp = frame_to_timestamp(frame, self.fps)
-                    interpolation = keyframes['rotation'][frame]
+                    is_baked = frame in bake_frames
                     current_rot = get_vector_json(mc_rot)
                     rotation_data[timestamp] = self._make_keyframe_value(
-                        current_rot, interpolation, prev_rot, prev_interp
+                        current_rot, prev_rot, prev_interp, is_baked
                     )
                     prev_rot = current_rot
-                    prev_interp = interpolation
+                    prev_interp = 'LINEAR' if is_baked else keyframes['rotation'].get(frame)
 
             if rotation_data:
                 bone_data['rotation'] = rotation_data
@@ -278,7 +313,11 @@ class BBAnimExporter:
             scale_data = {}
             prev_scale = None
             prev_interp = None
-            for frame in sorted(keyframes['scale'].keys()):
+            # 获取需要烘焙的帧
+            bake_frames = self.get_bake_frames(keyframes['scale'], frame_start, frame_end)
+            # 合并关键帧和烘焙帧
+            all_frames = set(keyframes['scale'].keys()) | bake_frames
+            for frame in sorted(all_frames):
                 if frame < frame_start or frame > frame_end:
                     continue
                 transform = self.sample_bone_transform_at_frame(bone_name, frame)
@@ -290,13 +329,13 @@ class BBAnimExporter:
                         transform['scale'][1],  # Y -> Z
                     ]
                     timestamp = frame_to_timestamp(frame, self.fps)
-                    interpolation = keyframes['scale'][frame]
+                    is_baked = frame in bake_frames
                     current_scale = get_vector_json(mc_scale)
                     scale_data[timestamp] = self._make_keyframe_value(
-                        current_scale, interpolation, prev_scale, prev_interp
+                        current_scale, prev_scale, prev_interp, is_baked
                     )
                     prev_scale = current_scale
-                    prev_interp = interpolation
+                    prev_interp = 'LINEAR' if is_baked else keyframes['scale'].get(frame)
 
             if scale_data:
                 bone_data['scale'] = scale_data
