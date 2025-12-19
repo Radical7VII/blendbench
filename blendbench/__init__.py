@@ -14,12 +14,14 @@
 from . import import_bedrock_anim
 from . import export_bedrock_anim
 from . import import_bedrock_model
+from . import sync_server
 
 
 modules = [
     import_bedrock_anim,
     export_bedrock_anim,
     import_bedrock_model,
+    sync_server,
 ]
 
 
