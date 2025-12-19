@@ -15,6 +15,13 @@ from mathutils import Quaternion
 
 # 动画时间戳精度（小数位数）
 ANIMATION_TIMESTAMP_PRECISION = 4
+
+# 关键帧插值模式映射
+# Blender 插值类型 -> Blockbench lerp_mode
+# 'CONSTANT' -> 不导出 lerp_mode（使用默认的 step）
+# 'LINEAR' -> 不导出 lerp_mode（使用默认的 linear）
+# 'BEZIER' -> 根据设置导出为 'catmullrom' 或 'bezier'
+BEZIER_EXPORT_MODE = 'catmullrom'  # 可选: 'catmullrom' (smooth) 或 'bezier'
 # Minecraft 缩放因子：Blender 1米 = Minecraft 16单位
 MINECRAFT_SCALE_FACTOR = 16.0
 
@@ -31,6 +38,33 @@ def frame_to_timestamp(frame: int, fps: float) -> str:
 def get_vector_json(vec) -> List[float]:
     """将向量转换为 JSON 格式的列表，四舍五入到合理精度"""
     return [round(v, 6) for v in vec]
+
+
+def format_keyframe_value(vec: List[float], interpolation: str) -> Any:
+    """
+    根据插值类型格式化关键帧值
+
+    Args:
+        vec: 变换值向量 [x, y, z]
+        interpolation: Blender 插值类型 ('CONSTANT', 'LINEAR', 'BEZIER')
+
+    Returns:
+        - LINEAR/CONSTANT: 直接返回数组 [x, y, z]
+        - BEZIER (catmullrom): {"post": [x, y, z], "lerp_mode": "catmullrom"}
+        - BEZIER (bezier): {"vector": [x, y, z], "lerp_mode": "bezier"}
+    """
+    value = get_vector_json(vec)
+
+    if interpolation == 'BEZIER':
+        # catmullrom 使用 "post" 键，bezier 使用 "vector" 键
+        value_key = "post" if BEZIER_EXPORT_MODE == 'catmullrom' else "vector"
+        return {
+            value_key: value,
+            "lerp_mode": BEZIER_EXPORT_MODE
+        }
+    else:
+        # LINEAR 和 CONSTANT 使用简单数组格式
+        return value
 
 
 def convert_location_to_minecraft(loc) -> List[float]:
@@ -81,12 +115,20 @@ class BBAnimExporter:
         self.armature = armature
         self.fps = bpy.context.scene.render.fps / bpy.context.scene.render.fps_base
 
-    def get_bone_keyframes(self, bone_name: str) -> Dict[str, set]:
-        """获取指定骨骼的所有关键帧帧号，按变换类型分类"""
+    def get_bone_keyframes(self, bone_name: str) -> Dict[str, Dict[int, str]]:
+        """
+        获取指定骨骼的所有关键帧帧号及其插值类型，按变换类型分类
+
+        返回格式: {
+            'location': {frame: interpolation_type, ...},
+            'rotation': {frame: interpolation_type, ...},
+            'scale': {frame: interpolation_type, ...}
+        }
+        """
         keyframes = {
-            'location': set(),
-            'rotation': set(),
-            'scale': set()
+            'location': {},
+            'rotation': {},
+            'scale': {}
         }
 
         if not self.armature.animation_data or not self.armature.animation_data.action:
@@ -116,7 +158,11 @@ class BBAnimExporter:
 
             if transform_type:
                 for keyframe in fcurve.keyframe_points:
-                    keyframes[transform_type].add(int(keyframe.co[0]))
+                    frame = int(keyframe.co[0])
+                    interpolation = keyframe.interpolation  # 'CONSTANT', 'LINEAR', 'BEZIER'
+                    # 如果同一帧有多个通道，优先保留 BEZIER
+                    if frame not in keyframes[transform_type] or interpolation == 'BEZIER':
+                        keyframes[transform_type][frame] = interpolation
 
         return keyframes
 
@@ -165,14 +211,15 @@ class BBAnimExporter:
         # 收集位置关键帧
         if keyframes['location']:
             position_data = {}
-            for frame in sorted(keyframes['location']):
+            for frame in sorted(keyframes['location'].keys()):
                 if frame < frame_start or frame > frame_end:
                     continue
                 transform = self.sample_bone_transform_at_frame(bone_name, frame)
                 if transform:
                     mc_loc = convert_location_to_minecraft(transform['location'])
                     timestamp = frame_to_timestamp(frame, self.fps)
-                    position_data[timestamp] = get_vector_json(mc_loc)
+                    interpolation = keyframes['location'][frame]
+                    position_data[timestamp] = format_keyframe_value(mc_loc, interpolation)
 
             if position_data:
                 bone_data['position'] = position_data
@@ -180,14 +227,15 @@ class BBAnimExporter:
         # 收集旋转关键帧
         if keyframes['rotation']:
             rotation_data = {}
-            for frame in sorted(keyframes['rotation']):
+            for frame in sorted(keyframes['rotation'].keys()):
                 if frame < frame_start or frame > frame_end:
                     continue
                 transform = self.sample_bone_transform_at_frame(bone_name, frame)
                 if transform:
                     mc_rot = convert_rotation_to_minecraft(transform['rotation'])
                     timestamp = frame_to_timestamp(frame, self.fps)
-                    rotation_data[timestamp] = get_vector_json(mc_rot)
+                    interpolation = keyframes['rotation'][frame]
+                    rotation_data[timestamp] = format_keyframe_value(mc_rot, interpolation)
 
             if rotation_data:
                 bone_data['rotation'] = rotation_data
@@ -195,7 +243,7 @@ class BBAnimExporter:
         # 收集缩放关键帧
         if keyframes['scale']:
             scale_data = {}
-            for frame in sorted(keyframes['scale']):
+            for frame in sorted(keyframes['scale'].keys()):
                 if frame < frame_start or frame > frame_end:
                     continue
                 transform = self.sample_bone_transform_at_frame(bone_name, frame)
@@ -207,7 +255,8 @@ class BBAnimExporter:
                         transform['scale'][1],  # Y -> Z
                     ]
                     timestamp = frame_to_timestamp(frame, self.fps)
-                    scale_data[timestamp] = get_vector_json(mc_scale)
+                    interpolation = keyframes['scale'][frame]
+                    scale_data[timestamp] = format_keyframe_value(mc_scale, interpolation)
 
             if scale_data:
                 bone_data['scale'] = scale_data
