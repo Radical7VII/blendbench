@@ -295,7 +295,7 @@ class IMPORT_OT_bedrock_anim(bpy.types.Operator, ImportHelper):
 
 def menu_func_import(self, context):
     self.layout.operator(
-        IMPORT_OT_bedrock_anim.bl_idname, text="Import Bedrock Animation"
+        IMPORT_OT_bedrock_anim.bl_idname, text="Bedrock Animation"
     )
 
 
